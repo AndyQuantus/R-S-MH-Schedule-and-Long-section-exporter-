@@ -21,8 +21,8 @@ import contextlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pdfplumber
 
@@ -151,7 +151,7 @@ def _pick_best_numeric(word_list: list[dict]) -> float | None:
     candidates: list[float] = []
     for w in word_list:
         with contextlib.suppress(ValueError):
-            candidates.append(float(w["text"ene]))
+            candidates.append(float(w["text"]))
     if not candidates:
         return None
     if len(candidates) > 1:
