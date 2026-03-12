@@ -97,6 +97,21 @@ def _looks_like_level(text: str) -> bool:
     return bool(_DECIMAL_RE.match(text.strip()))
 
 
+def _near_gradient(words: list[dict], w: dict, radius: float = 35.0) -> bool:
+    """Reject numeric tokens that sit next to gradient or slope text."""
+    wx0 = w["x0"]
+    wy = (w["top"] + w["bottom"]) / 2.0
+    for other in words:
+        oy = (other["top"] + other["bottom"]) / 2.0
+        if abs(oy - wy) > 10:
+            continue
+        if abs(other["x0"] - wx0) > radius:
+            continue
+        if _GRADIENT_RE.search(other.get("text", "")):
+            return True
+    return False
+
+
 def _get_band_numerics(
     words: list[dict],
     band_y: float,
@@ -202,6 +217,99 @@ def _score_confidence(
             score += 0.1
 
     return min(score, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Column-based extraction helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_chainage_value(v: float) -> bool:
+    return 0.0 <= v <= 2000.0
+
+
+def _is_level_value(v: float) -> bool:
+    return 10.0 <= v <= 400.0
+
+
+def _cluster_numeric_words_all(words: list[dict], x_tol: float = 20.0) -> dict[float, list[dict]]:
+    nums = [w for w in words if _looks_like_level(w.get("text", "")) and not _near_gradient(words, w)]
+    return _cluster_x_positions(nums, x_tol)
+
+
+def _column_values_sorted_by_y(col_words: list[dict]) -> list[float]:
+    col_words = sorted(col_words, key=lambda w: (w["top"], w["x0"]))
+    vals: list[float] = []
+    for w in col_words:
+        with contextlib.suppress(ValueError):
+            vals.append(float(w["text"]))
+    return vals
+
+
+def _pick_chainage_column(cols: dict[float, list[dict]]) -> tuple[float, list[float]] | None:
+    best = None
+    best_score = -1.0
+    for x, ws in cols.items():
+        vals = [v for v in _column_values_sorted_by_y(ws) if _is_chainage_value(v)]
+        if len(vals) < 8:
+            continue
+        mono = sum(1 for i in range(len(vals) - 1) if vals[i + 1] >= vals[i]) / max(1, len(vals) - 1)
+        mult5 = sum(1 for v in vals if abs((v / 5.0) - round(v / 5.0)) < 1e-6) / len(vals)
+        starts_low = 1.0 if vals[0] <= 10.0 else 0.0
+        score = (0.6 * mono) + (0.3 * mult5) + (0.1 * starts_low) + (0.02 * len(vals))
+        if score > best_score:
+            best_score = score
+            best = (x, vals)
+    return best
+
+
+def _pick_level_columns(
+    cols: dict[float, list[dict]], exclude_x: float
+) -> list[tuple[float, list[float]]]:
+    candidates: list[tuple[float, list[float]]] = []
+    for x, ws in cols.items():
+        if abs(x - exclude_x) < 1e-6:
+            continue
+        vals = [v for v in _column_values_sorted_by_y(ws) if _is_level_value(v)]
+        if len(vals) >= 8:
+            candidates.append((x, vals))
+    candidates.sort(key=lambda t: len(t[1]), reverse=True)
+    return candidates[:2]
+
+
+def _extract_long_section_by_columns(words: list[dict]) -> list[LongSectionRow]:
+    cols = _cluster_numeric_words_all(words, x_tol=20.0)
+    if not cols:
+        return []
+
+    ch_pick = _pick_chainage_column(cols)
+    if not ch_pick:
+        return []
+
+    ch_x, ch_vals = ch_pick
+    lv_cols = _pick_level_columns(cols, exclude_x=ch_x)
+    if len(lv_cols) < 2:
+        return []
+
+    lv_cols.sort(key=lambda t: t[0])
+    ex_vals = lv_cols[0][1]
+    pr_vals = lv_cols[1][1]
+
+    n = min(len(ch_vals), len(ex_vals), len(pr_vals))
+    if n < 8:
+        return []
+
+    rows: list[LongSectionRow] = []
+    last = None
+    for i in range(n):
+        ch = ch_vals[i]
+        ex = ex_vals[i]
+        pr = pr_vals[i]
+        if last is not None and ch < last:
+            continue
+        rows.append(LongSectionRow(chainage=ch, existing_level=ex, proposed_level=pr))
+        last = ch
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -408,13 +516,23 @@ def extract_long_sections(
                     _write_debug_dump(dump_dir, pdf_name, page_num, words, rows, confidence)
 
                 if not rows:
-                    if found_ch:
+                    # Try the column-based fallback
+                    rows = _extract_long_section_by_columns(words)
+                    if rows:
                         log.warning(
-                            "pdf=%s page=%d long section bands found but no complete rows",
+                            "pdf=%s page=%d using column fallback, rows=%d",
                             pdf_name,
                             page_num,
+                            len(rows),
                         )
-                    continue
+                    else:
+                        if found_ch:
+                            log.warning(
+                                "pdf=%s page=%d long section bands found but no complete rows",
+                                pdf_name,
+                                page_num,
+                            )
+                        continue
 
                 # Detect if this is a continuation or a new table
                 first_chainage = rows[0].chainage if rows else None
