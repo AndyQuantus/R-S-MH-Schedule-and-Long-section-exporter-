@@ -24,7 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ruff pytest openpyxl pdfplumber
-
+          pip install -e .
       - name: Lint with ruff (check)
         run: ruff check src/ tests/
 
