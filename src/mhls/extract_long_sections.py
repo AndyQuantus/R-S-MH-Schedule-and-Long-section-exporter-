@@ -73,8 +73,13 @@ DEFAULT_SNAP_TOL = 28.0
 # ---------------------------------------------------------------------------
 
 
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+
 def _is_chainage_label(text: str) -> bool:
     return _norm(text).rstrip(".") in _CHAINAGE_TOKENS
+
 
 def _is_existing_label(text: str) -> bool:
     lower = _norm(text)
@@ -85,7 +90,7 @@ def _is_alignment_label(text: str) -> bool:
     return any(t in lower for t in _ALIGNMENT_TOKENS)
 
 
-def _find_band_y(words: list[dict], label_fn) -> float | None:
+def _find_band_y(words: list[dict], label_fn: Callable[[str], bool]) -> float | None:
     """Return the y-centre of the first word matching label_fn."""
     for w in words:
         if label_fn(w.get("text", "")):
@@ -93,14 +98,23 @@ def _find_band_y(words: list[dict], label_fn) -> float | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Numeric token filtering
-# ---------------------------------------------------------------------------
-
-
-def _looks_like_level(text: str) -> bool:
-    """Return True if the text looks like a numeric level/chainage."""
+def _looks_like_decimal(text: str) -> bool:
     return bool(_DECIMAL_RE.match(text.strip()))
+
+
+def _near_gradient(words: list[dict], w: dict, radius: float = 35.0) -> bool:
+    """Reject numeric tokens that sit next to gradient or slope text."""
+    wx0 = w["x0"]
+    wy = (w["top"] + w["bottom"]) / 2.0
+    for other in words:
+        oy = (other["top"] + other["bottom"]) / 2.0
+        if abs(oy - wy) > 10:
+            continue
+        if abs(other["x0"] - wx0) > radius:
+            continue
+        if _GRADIENT_RE.search(other.get("text", "")):
+            return True
+    return False
 
 
 def _get_band_numerics(
@@ -112,17 +126,13 @@ def _get_band_numerics(
     result: list[dict] = []
     for w in words:
         mid_y = (w["top"] + w["bottom"]) / 2.0
-        if abs(mid_y - band_y) <= band_half_height and _looks_like_level(w["text"]):
-            result.append(w)
+        if abs(mid_y - band_y) <= band_half_height and _looks_like_decimal(w.get("text", "")):
+            if not _near_gradient(words, w):
+                result.append(w)
     return result
 
 
-# ---------------------------------------------------------------------------
-# X-column clustering
-# ---------------------------------------------------------------------------
-
-
-def _cluster_x_positions(words: list[dict], tolerance: float = 10.0) -> dict[float, list[dict]]:
+def _cluster_x_positions(words: list[dict], tolerance: float) -> dict[float, list[dict]]:
     """Cluster words into x columns by x0 position."""
     clusters: dict[float, list[dict]] = {}
     for w in sorted(words, key=lambda x: x["x0"]):
@@ -146,14 +156,11 @@ def _pick_best_numeric(word_list: list[dict]) -> float | None:
             candidates.append(float(w["text"]))
     if not candidates:
         return None
-    if len(candidates) > 1:
-        log.debug("Multiple numerics in column cluster: %s, using first", candidates)
     return candidates[0]
 
 
-# ---------------------------------------------------------------------------
-# X-column snapping
-# ---------------------------------------------------------------------------
+def _clusters_to_values(clusters: dict[float, list[dict]]) -> dict[float, float | None]:
+    return {cx: _pick_best_numeric(ws) for cx, ws in clusters.items()}
 
 
 def _snap_to_chainage_columns(
@@ -177,9 +184,51 @@ def _snap_to_chainage_columns(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Confidence scoring
-# ---------------------------------------------------------------------------
+def _build_rows_from_snaps(
+    ch_xs: list[float],
+    ch_vals: dict[float, float | None],
+    ex_snapped: dict[float, float | None],
+    al_snapped: dict[float, float | None],
+) -> list[LongSectionRow]:
+    rows: list[LongSectionRow] = []
+    for cx in ch_xs:
+        ch = ch_vals.get(cx)
+        ex = ex_snapped.get(cx)
+        al = al_snapped.get(cx)
+        if ch is not None and ex is not None and al is not None:
+            rows.append(LongSectionRow(chainage=ch, existing_level=ex, proposed_level=al))
+    return rows
+
+
+def _build_rows_by_index_fallback(
+    ch_vals_by_x: dict[float, float | None],
+    ex_vals_by_x: dict[float, float | None],
+    al_vals_by_x: dict[float, float | None],
+) -> list[LongSectionRow]:
+    """Fallback alignment by left to right order when snapping yields zero complete rows."""
+    ch_list = [(x, v) for x, v in sorted(ch_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
+    ex_list = [(x, v) for x, v in sorted(ex_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
+    al_list = [(x, v) for x, v in sorted(al_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
+
+    n = min(len(ch_list), len(ex_list), len(al_list))
+    if n < 8:
+        return []
+
+    rows: list[LongSectionRow] = []
+    last_ch: float | None = None
+
+    for i in range(n):
+        ch = float(ch_list[i][1])
+        ex = float(ex_list[i][1])
+        al = float(al_list[i][1])
+
+        if last_ch is not None and ch < last_ch:
+            continue
+
+        rows.append(LongSectionRow(chainage=ch, existing_level=ex, proposed_level=al))
+        last_ch = ch
+
+    return rows
 
 
 def _score_confidence(
@@ -368,7 +417,6 @@ _SAFE_CHARS_RE = re.compile(r"[^\w]")
 
 
 def _derive_sheet_name(pdf_path: Path, page_words: list[dict] | None = None) -> str:
-    """Derive a safe Excel sheet name from PDF filename or page content."""
     stem = pdf_path.stem
 
     m = _ROAD_LABEL_RE.search(stem)
@@ -390,11 +438,11 @@ def _derive_sheet_name(pdf_path: Path, page_words: list[dict] | None = None) -> 
         if m2:
             label = m2.group(1).strip()
             label_clean = re.sub(r"\s+", "", label)
-            road_num_m = re.match(r"[Rr][Oo][Aa][Dd](\d+)([A-Z]?)", label_clean, re.I)
-            if road_num_m:
-                num = road_num_m.group(1)
-                suffix = road_num_m.group(2)
-                return f"LS_Rd{num}_Road{num}{suffix}"
+            rd2 = re.match(r"[Rr][Oo][Aa][Dd](\d+)([A-Z]?)", label_clean, re.I)
+            if rd2:
+                num = rd2.group(1)
+                suffix = rd2.group(2)
+                return f"LS_Rd{num}_Road{num}{suffix}"[:31]
             return f"LS_{label_clean}"[:31]
 
     safe_stem = _SAFE_CHARS_RE.sub("_", stem)[:25]
@@ -443,10 +491,8 @@ def _extract_page_rows(
     }
 
     if not found_ch:
-        log.debug("pdf=%s page=%d no chainage band found", pdf_name, page_num)
-        return [], 0.0, False, False, False
+        return [], 0.0, debug
 
-    # Collect band numerics
     ch_words = _get_band_numerics(words, ch_y, band_half_height)  # type: ignore[arg-type]
     ch_clusters = _cluster_x_positions(ch_words, x_cluster_tol)
     ch_vals_by_x = _clusters_to_values(ch_clusters)
@@ -457,14 +503,7 @@ def _extract_page_rows(
     debug["chainage_columns_x"] = [round(x, 2) for x in ch_xs]
 
     if not ch_clusters:
-        log.debug("pdf=%s page=%d no chainage numerics found", pdf_name, page_num)
-        return [], 0.0, found_ch, found_ex, found_al
-
-    # Build sorted chainage x positions and values
-    ch_x_sorted = sorted(ch_clusters.keys())
-    ch_values: dict[float, float | None] = {}
-    for cx in ch_x_sorted:
-        ch_values[cx] = _pick_best_numeric(ch_clusters[cx])
+        return [], 0.0, debug
 
     rows: list[LongSectionRow] = []
 
@@ -479,25 +518,24 @@ def _extract_page_rows(
         ex_clusters = _cluster_x_positions(ex_words, x_cluster_tol)
         al_clusters = _cluster_x_positions(al_words, x_cluster_tol)
 
-        ex_snapped = _snap_to_chainage_columns(ex_clusters, ch_x_sorted, snap_tol)
-        al_snapped = _snap_to_chainage_columns(al_clusters, ch_x_sorted, snap_tol)
+        ex_vals_by_x = _clusters_to_values(ex_clusters)
+        al_vals_by_x = _clusters_to_values(al_clusters)
 
         debug["band_counts"]["existing"] = len(ex_words)
         debug["band_counts"]["alignment"] = len(al_words)
         debug["column_counts"]["existing"] = len(ex_clusters)
         debug["column_counts"]["alignment"] = len(al_clusters)
 
-            if ch_val is not None and ex_val is not None and al_val is not None:
-                rows.append(
-                    LongSectionRow(
-                        chainage=ch_val,
-                        existing_level=ex_val,
-                        proposed_level=al_val,
-                    )
-                )
-            else:
-                log.debug(
-                    "pdf=%s page=%d chainage x=%.1f: ch=%s ex=%s al=%s - incomplete",
+        ex_snapped = _snap_to_chainage_columns(ex_vals_by_x, ch_xs, snap_tol)
+        al_snapped = _snap_to_chainage_columns(al_vals_by_x, ch_xs, snap_tol)
+
+        rows = _build_rows_from_snaps(ch_xs, ch_vals_by_x, ex_snapped, al_snapped)
+
+        if not rows:
+            fallback_rows = _build_rows_by_index_fallback(ch_vals_by_x, ex_vals_by_x, al_vals_by_x)
+            if fallback_rows:
+                log.warning(
+                    "pdf=%s page=%d snapping gave 0 rows, using index fallback rows=%d",
                     pdf_name,
                     page_num,
                     len(fallback_rows),
@@ -511,9 +549,9 @@ def _extract_page_rows(
 
     else:
         if not found_ex:
-            log.warning("pdf=%s page=%d no existing ground band found", pdf_name, page_num)
+            log.warning("pdf=%s page=%d no existing band found", pdf_name, page_num)
         if not found_al:
-            log.warning("pdf=%s page=%d no alignment band found", pdf_name, page_num)
+            log.warning("pdf=%s page=%d no proposed or alignment band found", pdf_name, page_num)
 
     confidence = _score_confidence(
         rows=rows,
@@ -545,17 +583,14 @@ def _write_debug_dump(
     dump_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(pdf_name).stem
     out = dump_dir / f"{stem}_page{page_num}.json"
-    payload = {
-        "pdf": pdf_name,
-        "page": page_num,
-        "confidence": confidence,
-        "word_count": len(words),
-        "rows_extracted": len(rows),
-        "rows": [
-            {"chainage": r.chainage, "existing": r.existing_level, "proposed": r.proposed_level}
-            for r in rows
-        ],
-    }
+
+    payload = dict(debug)
+    payload["word_count"] = len(words)
+    payload["rows"] = [
+        {"chainage": r.chainage, "existing": r.existing_level, "proposed": r.proposed_level}
+        for r in rows
+    ]
+
     out.write_text(json.dumps(payload, indent=2))
     log.debug("Debug dump written: %s", out)
 
@@ -591,15 +626,13 @@ def extract_long_sections(
                     page, pdf_path, page_num, use_ocr=use_ocr
                 )
 
-                rows, confidence, found_ch, found_ex, found_al = _extract_page_rows(
-                    words, pdf_name, page_num
-                )
+                rows, confidence, debug = _extract_page_rows(words, pdf_name, page_num)
 
                 if debug_dumps and dump_dir is not None:
-                    _write_debug_dump(dump_dir, pdf_name, page_num, words, rows, confidence)
+                    _write_debug_dump(dump_dir, pdf_name, page_num, words, rows, debug)
 
                 if not rows:
-                    if found_ch:
+                    if debug.get("found_chainage_band"):
                         log.warning(
                             "pdf=%s page=%d using column fallback, rows=%d",
                             pdf_name,
@@ -633,7 +666,7 @@ def extract_long_sections(
                     current_table.confidence, confidence
                 )
                 current_table.page_numbers.append(page_num)
-                last_chainage = rows[-1].chainage if rows else last_chainage
+                last_chainage = rows[-1].chainage
 
                 log.info(
                     "pdf=%s page=%d extracted %d rows, confidence=%.2f",
