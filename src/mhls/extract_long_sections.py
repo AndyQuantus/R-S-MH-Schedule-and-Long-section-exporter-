@@ -22,7 +22,6 @@ import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Iterable
 
 import pdfplumber
 
@@ -85,6 +84,7 @@ def _is_existing_label(text: str) -> bool:
     lower = _norm(text)
     return any(t in lower for t in _EXISTING_TOKENS)
 
+
 def _is_alignment_label(text: str) -> bool:
     lower = _norm(text)
     return any(t in lower for t in _ALIGNMENT_TOKENS)
@@ -126,9 +126,12 @@ def _get_band_numerics(
     result: list[dict] = []
     for w in words:
         mid_y = (w["top"] + w["bottom"]) / 2.0
-        if abs(mid_y - band_y) <= band_half_height and _looks_like_decimal(w.get("text", "")):
-            if not _near_gradient(words, w):
-                result.append(w)
+        if (
+            abs(mid_y - band_y) <= band_half_height
+            and _looks_like_decimal(w.get("text", ""))
+            and not _near_gradient(words, w)
+        ):
+            result.append(w)
     return result
 
 
@@ -206,9 +209,15 @@ def _build_rows_by_index_fallback(
     al_vals_by_x: dict[float, float | None],
 ) -> list[LongSectionRow]:
     """Fallback alignment by left to right order when snapping yields zero complete rows."""
-    ch_list = [(x, v) for x, v in sorted(ch_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
-    ex_list = [(x, v) for x, v in sorted(ex_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
-    al_list = [(x, v) for x, v in sorted(al_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None]
+    ch_list = [
+        (x, v) for x, v in sorted(ch_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None
+    ]
+    ex_list = [
+        (x, v) for x, v in sorted(ex_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None
+    ]
+    al_list = [
+        (x, v) for x, v in sorted(al_vals_by_x.items(), key=lambda kv: kv[0]) if v is not None
+    ]
 
     n = min(len(ch_list), len(ex_list), len(al_list))
     if n < 8:
@@ -263,10 +272,7 @@ def _score_confidence(
 
     if n >= 2:
         chainages = [r.chainage for r in rows]
-        mono = all(
-            chainages[i] < chainages[i + 1]
-            for i in range(len(chainages) - 1)
-        )
+        mono = all(chainages[i] < chainages[i + 1] for i in range(len(chainages) - 1))
         if mono:
             score += 0.1
 
@@ -277,21 +283,18 @@ def _score_confidence(
 # Column-based extraction helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_chainage_value(v: float) -> bool:
     return 0.0 <= v <= 2000.0
+
 
 def _is_level_value(v: float) -> bool:
     return 10.0 <= v <= 400.0
 
 
-def _cluster_numeric_words_all(
-    words: list[dict], x_tol: float = 20.0
-) -> dict[float, list[dict]]:
+def _cluster_numeric_words_all(words: list[dict], x_tol: float = 20.0) -> dict[float, list[dict]]:
     nums = [
-        w
-        for w in words
-        if _looks_like_level(w.get("text", ""))
-        and not _near_gradient(words, w)
+        w for w in words if _looks_like_decimal(w.get("text", "")) and not _near_gradient(words, w)
     ]
     return _cluster_x_positions(nums, x_tol)
 
@@ -305,42 +308,19 @@ def _column_values_sorted_by_y(col_words: list[dict]) -> list[float]:
     return vals
 
 
-def _pick_chainage_column(
-    cols: dict[float, list[dict]]
-) -> tuple[float, list[float]] | None:
+def _pick_chainage_column(cols: dict[float, list[dict]]) -> tuple[float, list[float]] | None:
     best = None
     best_score = -1.0
     for x, ws in cols.items():
-        vals = [
-            v
-            for v in _column_values_sorted_by_y(ws)
-            if _is_chainage_value(v)
-        ]
+        vals = [v for v in _column_values_sorted_by_y(ws) if _is_chainage_value(v)]
         if len(vals) < 8:
             continue
-        mono = (
-            sum(
-                1
-                for i in range(len(vals) - 1)
-                if vals[i + 1] >= vals[i]
-            )
-            / max(1, len(vals) - 1)
+        mono = sum(1 for i in range(len(vals) - 1) if vals[i + 1] >= vals[i]) / max(
+            1, len(vals) - 1
         )
-        mult5 = (
-            sum(
-                1
-                for v in vals
-                if abs((v / 5.0) - round(v / 5.0)) < 1e-6
-            )
-            / len(vals)
-        )
+        mult5 = sum(1 for v in vals if abs((v / 5.0) - round(v / 5.0)) < 1e-6) / len(vals)
         starts_low = 1.0 if vals[0] <= 10.0 else 0.0
-        score = (
-            (0.6 * mono)
-            + (0.3 * mult5)
-            + (0.1 * starts_low)
-            + (0.02 * len(vals))
-        )
+        score = (0.6 * mono) + (0.3 * mult5) + (0.1 * starts_low) + (0.02 * len(vals))
         if score > best_score:
             best_score = score
             best = (x, vals)
@@ -354,11 +334,7 @@ def _pick_level_columns(
     for x, ws in cols.items():
         if abs(x - exclude_x) < 1e-6:
             continue
-        vals = [
-            v
-            for v in _column_values_sorted_by_y(ws)
-            if _is_level_value(v)
-        ]
+        vals = [v for v in _column_values_sorted_by_y(ws) if _is_level_value(v)]
         if len(vals) >= 8:
             candidates.append((x, vals))
     candidates.sort(key=lambda t: len(t[1]), reverse=True)
@@ -395,13 +371,7 @@ def _extract_long_section_by_columns(words: list[dict]) -> list[LongSectionRow]:
         pr = pr_vals[i]
         if last is not None and ch < last:
             continue
-        rows.append(
-            LongSectionRow(
-                chainage=ch,
-                existing_level=ex,
-                proposed_level=pr
-            )
-        )
+        rows.append(LongSectionRow(chainage=ch, existing_level=ex, proposed_level=pr))
         last = ch
     return rows
 
@@ -410,9 +380,7 @@ def _extract_long_section_by_columns(words: list[dict]) -> list[LongSectionRow]:
 # Sheet name derivation
 # ---------------------------------------------------------------------------
 
-_ROAD_LABEL_RE = re.compile(
-    r"\b(Rd\s*\d+[A-Z]?|Road\s*\d+[A-Z]?|POS)\b", re.IGNORECASE
-)
+_ROAD_LABEL_RE = re.compile(r"\b(Rd\s*\d+[A-Z]?|Road\s*\d+[A-Z]?|POS)\b", re.IGNORECASE)
 _SAFE_CHARS_RE = re.compile(r"[^\w]")
 
 
@@ -452,6 +420,7 @@ def _derive_sheet_name(pdf_path: Path, page_words: list[dict] | None = None) -> 
 # ---------------------------------------------------------------------------
 # Per-page extraction
 # ---------------------------------------------------------------------------
+
 
 def _extract_page_rows(
     words: list[dict],
@@ -508,12 +477,8 @@ def _extract_page_rows(
     rows: list[LongSectionRow] = []
 
     if found_ex and found_al:
-        ex_words = _get_band_numerics(
-            words, ex_y, band_half_height
-        )  # type: ignore[arg-type]
-        al_words = _get_band_numerics(
-            words, al_y, band_half_height
-        )  # type: ignore[arg-type]
+        ex_words = _get_band_numerics(words, ex_y, band_half_height)  # type: ignore[arg-type]
+        al_words = _get_band_numerics(words, al_y, band_half_height)  # type: ignore[arg-type]
 
         ex_clusters = _cluster_x_positions(ex_words, x_cluster_tol)
         al_clusters = _cluster_x_positions(al_words, x_cluster_tol)
@@ -572,6 +537,7 @@ def _extract_page_rows(
 # Debug dumps
 # ---------------------------------------------------------------------------
 
+
 def _write_debug_dump(
     dump_dir: Path,
     pdf_name: str,
@@ -599,6 +565,7 @@ def _write_debug_dump(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def extract_long_sections(
     pdf_path: Path,
     use_ocr: bool = True,
@@ -622,9 +589,7 @@ def extract_long_sections(
                     page_num,
                 )
 
-                words = get_page_words(
-                    page, pdf_path, page_num, use_ocr=use_ocr
-                )
+                words = get_page_words(page, pdf_path, page_num, use_ocr=use_ocr)
 
                 rows, confidence, debug = _extract_page_rows(words, pdf_name, page_num)
 
@@ -640,10 +605,9 @@ def extract_long_sections(
                             len(rows),
                         )
                     else:
-                        if found_ch:
+                        if debug.get("found_chainage_band"):
                             log.warning(
-                                "pdf=%s page=%d long section bands found but"
-                                " no complete rows",
+                                "pdf=%s page=%d long section bands found but no complete rows",
                                 pdf_name,
                                 page_num,
                             )
@@ -662,9 +626,7 @@ def extract_long_sections(
                     tables.append(current_table)
 
                 current_table.rows.extend(rows)
-                current_table.confidence = max(
-                    current_table.confidence, confidence
-                )
+                current_table.confidence = max(current_table.confidence, confidence)
                 current_table.page_numbers.append(page_num)
                 last_chainage = rows[-1].chainage
 
@@ -678,8 +640,7 @@ def extract_long_sections(
 
                 if confidence < 0.5:
                     log.warning(
-                        "pdf=%s page=%d low confidence %.2f for long"
-                        " section",
+                        "pdf=%s page=%d low confidence %.2f for long section",
                         pdf_name,
                         page_num,
                         confidence,
@@ -697,4 +658,3 @@ def extract_long_sections(
             seen[t.sheet_name] = 1
 
     return tables
-
