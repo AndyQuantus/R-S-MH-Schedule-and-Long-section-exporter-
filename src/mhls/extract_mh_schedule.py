@@ -74,8 +74,40 @@ def _all_inverts_from_row(cells: list[str]) -> list[float]:
 
 _MH_REF_TOKENS = {"mh", "ref", "mh ref", "chamber", "reference", "manhole"}
 _MH_DIA_TOKENS = {"dia", "size", "mh dia", "chamber size", "internal", "diameter"}
-_COVER_TOKENS = {"cover", "covel", "cl", "cover level"}
-_INVERT_TOKENS = {"invert", "il", "invert level"}
+_COVER_TOKENS = {
+    "cover",
+    "covel",
+    "cl",
+    "cover level",
+    "cover levels",
+    "cover elevation",
+    "cover elevations",
+}
+_INVERT_TOKENS = {
+    "invert",
+    "il",
+    "invert level",
+    "invert levels",
+    "invert elevation",
+    "invert elevations",
+    "inv",
+    "inv level",
+}
+
+
+def _normalise_header(text: str) -> str:
+    """Normalise a header cell for token matching.
+
+    Collapses internal whitespace, strips leading/trailing whitespace, and
+    lower-cases the result.  This ensures that multi-line PDF cells such as
+    ``"COVER\\nLEVELS"`` are treated identically to ``"COVER LEVELS"``.
+    """
+    return " ".join(text.lower().split())
+
+
+def _header_matches(normalised: str, tokens: set[str]) -> bool:
+    """Return True when *normalised* contains any token as a substring."""
+    return any(t in normalised for t in tokens)
 
 
 def _header_col_indices(
@@ -88,15 +120,15 @@ def _header_col_indices(
     invert_cols: list[int] = []
 
     for i, cell in enumerate(header_row):
-        lower = cell.lower().strip()
+        norm = _normalise_header(cell)
         # Check more-specific tokens first to avoid "mh" matching "mh dia (size)"
-        if any(t in lower for t in _MH_DIA_TOKENS):
+        if _header_matches(norm, _MH_DIA_TOKENS):
             dia_col = i
-        elif any(t in lower for t in _COVER_TOKENS):
+        elif _header_matches(norm, _COVER_TOKENS):
             cover_col = i
-        elif any(t in lower for t in _INVERT_TOKENS):
+        elif _header_matches(norm, _INVERT_TOKENS):
             invert_cols.append(i)
-        elif any(t in lower for t in _MH_REF_TOKENS):
+        elif _header_matches(norm, _MH_REF_TOKENS):
             ref_col = i
 
     return ref_col, dia_col, cover_col, invert_cols
@@ -300,14 +332,14 @@ def _extract_from_words(
     col_positions: list[float] = [cx for cx, _ in merged_cells]
 
     for x, label in merged_cells:
-        lower = label.lower()
-        if any(t in lower for t in _MH_DIA_TOKENS):
+        norm = _normalise_header(label)
+        if _header_matches(norm, _MH_DIA_TOKENS):
             dia_col_x = x
-        elif any(t in lower for t in _COVER_TOKENS):
+        elif _header_matches(norm, _COVER_TOKENS):
             cover_col_x = x
-        elif any(t in lower for t in _INVERT_TOKENS):
+        elif _header_matches(norm, _INVERT_TOKENS):
             invert_col_xs.append(x)
-        elif any(t in lower for t in _MH_REF_TOKENS):
+        elif _header_matches(norm, _MH_REF_TOKENS):
             ref_col_x = x
 
     if ref_col_x is None:
