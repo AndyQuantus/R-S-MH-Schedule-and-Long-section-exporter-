@@ -73,21 +73,16 @@ class TestClusterXPositions:
 
 class TestSnapToChainageColumns:
     def test_snaps_within_tolerance(self) -> None:
-        src_clusters = {
-            102.0: [{"text": "99.500", "x0": 102.0, "x1": 130.0, "top": 96, "bottom": 104}],
-            202.0: [{"text": "99.200", "x0": 202.0, "x1": 230.0, "top": 96, "bottom": 104}],
-        }
+        src_values = {102.0: 99.5, 202.0: 99.2}
         chainage_xs = [100.0, 200.0]
-        result = _snap_to_chainage_columns(src_clusters, chainage_xs, tolerance=12.0)
+        result = _snap_to_chainage_columns(src_values, chainage_xs, tolerance=12.0)
         assert result[100.0] == pytest.approx(99.5)
         assert result[200.0] == pytest.approx(99.2)
 
     def test_no_snap_outside_tolerance(self) -> None:
-        src_clusters = {
-            300.0: [{"text": "99.500", "x0": 300.0, "x1": 330.0, "top": 96, "bottom": 104}],
-        }
+        src_values = {300.0: 99.5}
         chainage_xs = [100.0]
-        result = _snap_to_chainage_columns(src_clusters, chainage_xs, tolerance=12.0)
+        result = _snap_to_chainage_columns(src_values, chainage_xs, tolerance=12.0)
         assert result[100.0] is None
 
 

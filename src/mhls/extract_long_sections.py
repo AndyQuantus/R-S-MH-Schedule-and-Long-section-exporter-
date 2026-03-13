@@ -102,6 +102,10 @@ def _looks_like_decimal(text: str) -> bool:
     return bool(_DECIMAL_RE.match(text.strip()))
 
 
+#: Public alias used by tests and external callers.
+_looks_like_level = _looks_like_decimal
+
+
 def _near_gradient(words: list[dict], w: dict, radius: float = 35.0) -> bool:
     """Reject numeric tokens that sit next to gradient or slope text."""
     wx0 = w["x0"]
@@ -432,11 +436,11 @@ def _extract_page_rows(
 ) -> tuple[
     list[LongSectionRow],
     float,
-    dict,
+    bool,
+    bool,
+    bool,
 ]:
-    """
-    Returns rows, confidence, and debug details dict.
-    """
+    """Return (rows, confidence, found_chainage, found_existing, found_alignment)."""
     ch_y = _find_band_y(words, _is_chainage_label)
     ex_y = _find_band_y(words, _is_existing_label)
     al_y = _find_band_y(words, _is_alignment_label)
@@ -445,34 +449,19 @@ def _extract_page_rows(
     found_ex = ex_y is not None
     found_al = al_y is not None
 
-    debug: dict = {
-        "pdf": pdf_name,
-        "page": page_num,
-        "found_chainage_band": found_ch,
-        "found_existing_band": found_ex,
-        "found_alignment_band": found_al,
-        "band_y": {"chainage": ch_y, "existing": ex_y, "alignment": al_y},
-        "tolerances": {
-            "band_half_height": band_half_height,
-            "x_cluster_tol": x_cluster_tol,
-            "snap_tol": snap_tol,
-        },
-    }
-
     if not found_ch:
-        return [], 0.0, debug
+        return [], 0.0, found_ch, found_ex, found_al
 
     ch_words = _get_band_numerics(words, ch_y, band_half_height)  # type: ignore[arg-type]
     ch_clusters = _cluster_x_positions(ch_words, x_cluster_tol)
     ch_vals_by_x = _clusters_to_values(ch_clusters)
     ch_xs = sorted(ch_clusters.keys())
 
-    debug["band_counts"] = {"chainage": len(ch_words), "existing": 0, "alignment": 0}
-    debug["column_counts"] = {"chainage": len(ch_clusters), "existing": 0, "alignment": 0}
-    debug["chainage_columns_x"] = [round(x, 2) for x in ch_xs]
+    ex_cols = 0
+    al_cols = 0
 
     if not ch_clusters:
-        return [], 0.0, debug
+        return [], 0.0, found_ch, found_ex, found_al
 
     rows: list[LongSectionRow] = []
 
@@ -486,10 +475,8 @@ def _extract_page_rows(
         ex_vals_by_x = _clusters_to_values(ex_clusters)
         al_vals_by_x = _clusters_to_values(al_clusters)
 
-        debug["band_counts"]["existing"] = len(ex_words)
-        debug["band_counts"]["alignment"] = len(al_words)
-        debug["column_counts"]["existing"] = len(ex_clusters)
-        debug["column_counts"]["alignment"] = len(al_clusters)
+        ex_cols = len(ex_clusters)
+        al_cols = len(al_clusters)
 
         ex_snapped = _snap_to_chainage_columns(ex_vals_by_x, ch_xs, snap_tol)
         al_snapped = _snap_to_chainage_columns(al_vals_by_x, ch_xs, snap_tol)
@@ -506,11 +493,6 @@ def _extract_page_rows(
                     len(fallback_rows),
                 )
                 rows = fallback_rows
-                debug["used_fallback"] = "index_order"
-            else:
-                debug["used_fallback"] = None
-        else:
-            debug["used_fallback"] = None
 
     else:
         if not found_ex:
@@ -524,13 +506,11 @@ def _extract_page_rows(
         found_existing=found_ex,
         found_alignment=found_al,
         ch_cols=len(ch_clusters),
-        ex_cols=debug["column_counts"]["existing"],
-        al_cols=debug["column_counts"]["alignment"],
+        ex_cols=ex_cols,
+        al_cols=al_cols,
     )
-    debug["confidence"] = confidence
-    debug["rows_extracted"] = len(rows)
 
-    return rows, confidence, debug
+    return rows, confidence, found_ch, found_ex, found_al
 
 
 # ---------------------------------------------------------------------------
@@ -591,27 +571,34 @@ def extract_long_sections(
 
                 words = get_page_words(page, pdf_path, page_num, use_ocr=use_ocr)
 
-                rows, confidence, debug = _extract_page_rows(words, pdf_name, page_num)
+                rows, confidence, found_ch, found_ex, found_al = _extract_page_rows(
+                    words, pdf_name, page_num
+                )
 
                 if debug_dumps and dump_dir is not None:
-                    _write_debug_dump(dump_dir, pdf_name, page_num, words, rows, debug)
+                    _write_debug_dump(
+                        dump_dir,
+                        pdf_name,
+                        page_num,
+                        words,
+                        rows,
+                        {
+                            "found_chainage_band": found_ch,
+                            "found_existing_band": found_ex,
+                            "found_alignment_band": found_al,
+                            "confidence": confidence,
+                            "rows_extracted": len(rows),
+                        },
+                    )
 
                 if not rows:
-                    if debug.get("found_chainage_band"):
+                    if found_ch:
                         log.warning(
-                            "pdf=%s page=%d using column fallback, rows=%d",
+                            "pdf=%s page=%d long section bands found but no complete rows",
                             pdf_name,
                             page_num,
-                            len(rows),
                         )
-                    else:
-                        if debug.get("found_chainage_band"):
-                            log.warning(
-                                "pdf=%s page=%d long section bands found but no complete rows",
-                                pdf_name,
-                                page_num,
-                            )
-                        continue
+                    continue
 
                 first_chainage = rows[0].chainage
 

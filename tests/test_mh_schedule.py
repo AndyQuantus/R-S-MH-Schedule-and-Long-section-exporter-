@@ -7,6 +7,8 @@ import pytest
 from mhls.extract_mh_schedule import (
     _extract_from_camelot_tables,
     _extract_from_words,
+    _header_col_indices,
+    _normalise_header,
     _parse_dia,
     _to_float,
 )
@@ -15,6 +17,72 @@ from tests.fixtures import (
     MH_SCHEDULE_TABLE_MULTI_INVERT,
     MH_SCHEDULE_WORDS,
 )
+
+
+class TestNormaliseHeader:
+    def test_lowercase(self) -> None:
+        assert _normalise_header("COVER LEVELS") == "cover levels"
+
+    def test_collapses_newline(self) -> None:
+        assert _normalise_header("INVERT\nLEVELS") == "invert levels"
+
+    def test_collapses_extra_spaces(self) -> None:
+        assert _normalise_header("  cover   level  ") == "cover level"
+
+
+class TestHeaderColIndicesPlural:
+    """Ensure plural/variant header forms are recognised correctly."""
+
+    def test_cover_levels_plural(self) -> None:
+        header = ["MH REF", "MH DIA (size)", "COVER LEVELS", "INVERT LEVELS"]
+        ref_col, dia_col, cover_col, invert_cols = _header_col_indices(header)
+        assert cover_col == 2
+
+    def test_invert_levels_plural(self) -> None:
+        header = ["MH REF", "MH DIA (size)", "COVER LEVELS", "INVERT LEVELS"]
+        ref_col, dia_col, cover_col, invert_cols = _header_col_indices(header)
+        assert 3 in invert_cols
+
+    def test_multiline_cover_levels(self) -> None:
+        """Camelot can produce newline-separated multi-line cell text."""
+        header = ["MH REF", "MH DIA (size)", "COVER\nLEVELS", "INVERT\nLEVELS"]
+        ref_col, dia_col, cover_col, invert_cols = _header_col_indices(header)
+        assert cover_col == 2
+        assert 3 in invert_cols
+
+    def test_cover_elevation_variant(self) -> None:
+        header = ["MH REF", "MH DIA (size)", "COVER ELEVATION", "INVERT ELEVATION"]
+        ref_col, dia_col, cover_col, invert_cols = _header_col_indices(header)
+        assert cover_col == 2
+        assert 3 in invert_cols
+
+
+class TestExtractFromCamelotTablesPlural:
+    """End-to-end extraction with plural column headers matching the problem PDF."""
+
+    def test_plural_cover_and_invert_headers(self) -> None:
+        table = [
+            ["MH REF", "MH DIA (size)", "COVER LEVELS", "INVERT LEVELS"],
+            ["S1", "1200", "50.250", "47.050"],
+            ["S2", "1200", "50.100", "46.900"],
+        ]
+        rows = _extract_from_camelot_tables([table], "test.pdf", 1)
+        assert len(rows) == 2
+        s1 = next(r for r in rows if r.mh_ref == "S1")
+        assert s1.cover_level == pytest.approx(50.25)
+        assert s1.invert_level == pytest.approx(47.05)
+
+    def test_multiline_cell_headers(self) -> None:
+        """Headers with embedded newlines (as produced by camelot) are handled."""
+        table = [
+            ["MH REF", "MH DIA\n(size)", "COVER\nLEVELS", "INVERT\nLEVELS"],
+            ["S3", "1500", "49.800", "46.500"],
+        ]
+        rows = _extract_from_camelot_tables([table], "test.pdf", 1)
+        assert len(rows) == 1
+        assert rows[0].cover_level == pytest.approx(49.8)
+        assert rows[0].invert_level == pytest.approx(46.5)
+
 
 
 class TestToFloat:

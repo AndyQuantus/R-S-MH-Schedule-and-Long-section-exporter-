@@ -47,9 +47,41 @@ def _parse_mm(text: str) -> int | None:
 
 _REF_TOKENS = {"ref", "mh ref", "chamber", "reference", "manhole", "ps", "pf"}
 _DIA_TOKENS = {"dia", "size", "mh dia", "chamber size", "internal"}
-_COVER_TOKENS = {"cover", "covel", "cl", "cover level"}
-_INVERT_TOKENS = {"invert", "il", "invert level"}
+_COVER_TOKENS = {
+    "cover",
+    "covel",
+    "cl",
+    "cover level",
+    "cover levels",
+    "cover elevation",
+    "cover elevations",
+}
+_INVERT_TOKENS = {
+    "invert",
+    "il",
+    "invert level",
+    "invert levels",
+    "invert elevation",
+    "invert elevations",
+    "inv",
+    "inv level",
+}
 _DIAMETER_TOKENS = {"diameter", "pipe dia", "ic dia"}
+
+
+def _normalise_header(text: str) -> str:
+    """Normalise a header cell for token matching.
+
+    Collapses internal whitespace, strips leading/trailing whitespace, and
+    lower-cases the result.  This ensures that multi-line PDF cells such as
+    ``"COVER\\nLEVELS"`` are treated identically to ``"COVER LEVELS"``.
+    """
+    return " ".join(text.lower().split())
+
+
+def _header_matches(normalised: str, tokens: set[str]) -> bool:
+    """Return True when *normalised* contains any token as a substring."""
+    return any(t in normalised for t in tokens)
 
 
 def _header_col_indices(
@@ -63,17 +95,17 @@ def _header_col_indices(
     diameter_col: int | None = None
 
     for i, cell in enumerate(header_row):
-        lower = cell.lower().strip()
+        norm = _normalise_header(cell)
         # Check explicit diameter first (more specific)
-        if any(t in lower for t in _DIAMETER_TOKENS) and "size" not in lower:
+        if _header_matches(norm, _DIAMETER_TOKENS) and "size" not in norm:
             diameter_col = i
-        elif any(t in lower for t in _DIA_TOKENS):
+        elif _header_matches(norm, _DIA_TOKENS):
             dia_col = i
-        elif any(t in lower for t in _COVER_TOKENS):
+        elif _header_matches(norm, _COVER_TOKENS):
             cover_col = i
-        elif any(t in lower for t in _INVERT_TOKENS):
+        elif _header_matches(norm, _INVERT_TOKENS):
             invert_cols.append(i)
-        elif any(t in lower for t in _REF_TOKENS):
+        elif _header_matches(norm, _REF_TOKENS):
             ref_col = i
 
     return ref_col, dia_col, cover_col, invert_cols, diameter_col
@@ -218,15 +250,16 @@ def _from_words(
     diam_col_x: float | None = None
 
     for x, label in zip(col_positions, col_labels, strict=False):
-        if any(t in label for t in _DIAMETER_TOKENS) and "size" not in label:
+        norm = _normalise_header(label)
+        if _header_matches(norm, _DIAMETER_TOKENS) and "size" not in norm:
             diam_col_x = x
-        elif any(t in label for t in _DIA_TOKENS):
+        elif _header_matches(norm, _DIA_TOKENS):
             dia_col_x = x
-        elif any(t in label for t in _COVER_TOKENS):
+        elif _header_matches(norm, _COVER_TOKENS):
             cover_col_x = x
-        elif any(t in label for t in _INVERT_TOKENS):
+        elif _header_matches(norm, _INVERT_TOKENS):
             invert_col_xs.append(x)
-        elif any(t in label for t in _REF_TOKENS):
+        elif _header_matches(norm, _REF_TOKENS):
             ref_col_x = x
 
     if ref_col_x is None:
